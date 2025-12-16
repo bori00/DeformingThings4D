@@ -1,6 +1,9 @@
 import bpy
 import bmesh
 import os
+# --- CHANGE START ---
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
+# --- CHANGE END ---
 import numpy as np
 import mathutils
 import cv2
@@ -9,10 +12,28 @@ import time
 from mathutils import Matrix, Vector, Quaternion, Euler
 from mathutils.bvhtree import BVHTree
 
-
-D=bpy.data
-C=bpy.context
+D = bpy.data
+C = bpy.context
 pi = 3.14
+
+
+# --- CHANGE START ---
+def write_flo(filename, flow):
+    """
+    Writes a .flo file (Middlebury format) compatible with RAFT.
+    flow: numpy array of shape (height, width, 2)
+    """
+    f = open(filename, 'wb')
+    magic = np.array([202021.25], dtype=np.float32)
+    (height, width) = flow.shape[0:2]
+    magic.tofile(f)
+    np.array([width], dtype=np.int32).tofile(f)
+    np.array([height], dtype=np.int32).tofile(f)
+    flow.astype(np.float32).tofile(f)
+    f.close()
+
+
+# --- CHANGE END ---
 
 def opencv_to_blender(T):
     """T: ndarray 4x4
@@ -32,7 +53,7 @@ def blender_to_opencv(T):
     return np.matmul(T,transform)#T * transform
 
 
-def set_camera( bpy_cam,  angle=pi / 3, W=600, H=500):
+def set_camera(bpy_cam, angle=pi / 3, W=600, H=500):
     """TODO: replace with setting by intrinsics """
     bpy_cam.angle = angle
     bpy_scene = bpy.context.scene
@@ -63,24 +84,24 @@ def get_calibration_matrix_K_from_blender(camd):
     pixel_aspect_ratio = scene.render.pixel_aspect_x / scene.render.pixel_aspect_y
     if (camd.sensor_fit == 'VERTICAL'):
         s_v = resolution_y_in_px * scale / sensor_height_in_mm
-        s_u = s_v/pixel_aspect_ratio
-    else: # 'HORIZONTAL' and 'AUTO'
+        s_u = s_v / pixel_aspect_ratio
+    else:  # 'HORIZONTAL' and 'AUTO'
         pixel_aspect_ratio = scene.render.pixel_aspect_x / scene.render.pixel_aspect_y
         s_u = resolution_x_in_px * scale / sensor_width_in_mm
-        s_v = s_u/pixel_aspect_ratio
+        s_v = s_u / pixel_aspect_ratio
     alpha_u = f_in_mm * s_u
     alpha_v = f_in_mm * s_v
-    u_0 = resolution_x_in_px*scale / 2
-    v_0 = resolution_y_in_px*scale / 2
-    skew = 0 # only use rectangular pixels
+    u_0 = resolution_x_in_px * scale / 2
+    v_0 = resolution_y_in_px * scale / 2
+    skew = 0  # only use rectangular pixels
     K = Matrix(
-        ((alpha_u, skew,    u_0),
-        (    0  ,  alpha_v, v_0),
-        (    0  ,    0,      1 )))
+        ((alpha_u, skew, u_0),
+         (0, alpha_v, v_0),
+         (0, 0, 1)))
     return K
 
 
-def anime_read( filename):
+def anime_read(filename):
     """
     filename: path of .anime file
     return:
@@ -112,7 +133,7 @@ class AnimeRenderer:
         #####################################################################
         _, _, _, vert_data, face_data, offset_data = \
             anime_read(anime_file)
-        offset_data = np.concatenate ( [ np.zeros( (1, offset_data.shape[1], offset_data.shape[2]) ), offset_data], axis=0)
+        offset_data = np.concatenate([np.zeros((1, offset_data.shape[1], offset_data.shape[2])), offset_data], axis=0)
         '''make object mesh'''
         vertices = vert_data.tolist()
         edges = []
@@ -121,7 +142,7 @@ class AnimeRenderer:
         mesh_data.from_pydata(vertices, edges, faces)
         mesh_data.update()
         the_mesh = bpy.data.objects.new('the_mesh', mesh_data)
-        the_mesh.data.vertex_colors.new() # init color
+        the_mesh.data.vertex_colors.new()  # init color
         bpy.context.collection.objects.link(the_mesh)
         #####################################################################
         self.the_mesh = the_mesh
@@ -129,7 +150,6 @@ class AnimeRenderer:
         self.vert_data = vert_data
         #####################################################################
         self.dum_path = dum_path
-
 
     def vis_frame(self, fid):
         '''update geometry to a frame (for debug)'''
@@ -143,17 +163,24 @@ class AnimeRenderer:
         bm.to_mesh(self.the_mesh.data)
         bm.free()
 
-
-    def depthflowgen(self, flow_skip=1, render_sflow=True ):
+    def depthflowgen(self, flow_skip=1, render_sflow=True):
         num_frame = self.offset_data.shape[0]
         camera = D.objects["Camera"]
-        depth_dir = os.path.join( self.dum_path, "depth")
+        depth_dir = os.path.join(self.dum_path, "depth")
         if not os.path.exists(depth_dir):
             os.makedirs(depth_dir)
         if render_sflow:
             sflow_dir = os.path.join(self.dum_path, "sflow")
             if not os.path.exists(sflow_dir):
                 os.makedirs(sflow_dir)
+
+        # --- CHANGE START ---
+        # Create directories for Mask and Optical Flow
+        mask_dir = os.path.join(self.dum_path, "mask")
+        if not os.path.exists(mask_dir): os.makedirs(mask_dir)
+        flow_dir = os.path.join(self.dum_path, "optical_flow")
+        if not os.path.exists(flow_dir): os.makedirs(flow_dir)
+        # --- CHANGE END ---
 
         #####################################################################
         '''prepare rays, (put this inside the for loop if the camera also moves)'''
@@ -162,16 +189,19 @@ class AnimeRenderer:
         fx, fy, cx, cy = K[0][0], K[1][1], K[0][2], K[1][2]
         width, height = C.scene.render.resolution_x, C.scene.render.resolution_y
         cam_blender = np.array(camera.matrix_world)
-        print (camera.matrix_world, camera.location)
+        print(camera.matrix_world, camera.location)
         cam_opencv = blender_to_opencv(cam_blender)
         u, v = np.meshgrid(range(width), range(height))
         u = u.reshape(-1)
         v = v.reshape(-1)
         pix_position = np.stack([(u - cx) / fx, (v - cy) / fy, np.ones_like(u)], -1)
         cam_rotation = cam_opencv[:3, :3]
-        pix_position = np.matmul(cam_rotation, pix_position.transpose()).transpose()
         ray_direction = pix_position / np.linalg.norm(pix_position, axis=1, keepdims=True)
         ray_origin = cam_opencv[:3, 3:].transpose()
+
+        # --- CHANGE START ---
+        cam_opencv_inv = np.linalg.inv(cam_opencv)  # Pre-calculate for optical flow
+        # --- CHANGE END ---
 
         ####################################################################
         '''visulize ray geometry(for debug)'''
@@ -230,50 +260,96 @@ class AnimeRenderer:
             # but since ray_cast return the faceID, this code is more flexible to use, e.g. generating model2frame dense correspondences)
             raycast_mesh = self.the_mesh
             ray_begin_local = raycast_mesh.matrix_world.inverted() @ Vector(ray_origin[0])
-            depsgraph=bpy.context.evaluated_depsgraph_get()
+            depsgraph = bpy.context.evaluated_depsgraph_get()
             bvhtree = BVHTree.FromObject(raycast_mesh, depsgraph)
             pcl = np.zeros_like(ray_direction)
             sflow = np.zeros_like(ray_direction)
+
+            # --- CHANGE START ---
+            optical_flow = np.zeros((ray_direction.shape[0], 2), dtype=np.float32)
+            valid_mask = np.zeros((ray_direction.shape[0]), dtype=np.uint8)
+            # --- CHANGE END ---
+
             for i in range(ray_direction.shape[0]):
                 # start = time.time()
                 # hit, position, norm, faceID = raycast_mesh.ray_cast(ray_begin_local, Vector(ray_direction[i]), distance=60)
-                position, norm, faceID, _ =bvhtree.ray_cast(ray_begin_local, Vector(ray_direction[i]), 50)
+                position, norm, faceID, _ = bvhtree.ray_cast(ray_begin_local, Vector(ray_direction[i]), 50)
                 # end = time.time()
-                if position: # hit a triangle
-                    pcl[i]= Matrix(cam_opencv).inverted() @ raycast_mesh.matrix_world @ position
+                if position:  # hit a triangle
+                    # --- CHANGE START ---
+                    valid_mask[i] = 255  # Mark as Valid
+                    # --- CHANGE END ---
+                    pcl[i] = Matrix(cam_opencv).inverted() @ raycast_mesh.matrix_world @ position
                     if render_sflow and flow_exist:
                         face = bm.faces[faceID]
-                        vert_index = [ v.index for v in face.verts]
-                        vert_vector = [ v.co for v in face.verts ]
-                        weights = np.array( mathutils.interpolate.poly_3d_calc (vert_vector, position) )
-                        flow_vector = (vert_motion[vert_index] * weights.reshape([3,1])).sum(axis=0)
-                        sflow[i]=flow_vector
-            bm.free()
+                        vert_index = [v.index for v in face.verts]
+                        vert_vector = [v.co for v in face.verts]
+                        weights = np.array(mathutils.interpolate.poly_3d_calc(vert_vector, position))
+                        flow_vector = (vert_motion[vert_index] * weights.reshape([3, 1])).sum(axis=0)
+                        sflow[i] = flow_vector
 
+                        # --- CHANGE START ---
+                        # Calculate Optical Flow
+                        # 1. Rotate flow to camera space (Object -> World -> Camera)
+                        # flow_vector is currently in Object Space (which is aligned with World here)
+                        flow_world = Vector(flow_vector)
+                        flow_cam = Matrix(cam_opencv_inv[:3, :3]) @ flow_world
+
+                        # 2. Project P_t and P_t+1
+                        p_cam = Vector(pcl[i])
+                        p_next_cam = p_cam + flow_cam
+
+                        # Projection P_t
+                        if p_cam.z != 0:
+                            u_curr = fx * (p_cam.x / p_cam.z) + cx
+                            v_curr = fy * (p_cam.y / p_cam.z) + cy
+                        else:
+                            u_curr, v_curr = 0, 0
+
+                        # Projection P_t+1
+                        if p_next_cam.z != 0:
+                            u_next = fx * (p_next_cam.x / p_next_cam.z) + cx
+                            v_next = fy * (p_next_cam.y / p_next_cam.z) + cy
+                        else:
+                            u_next, v_next = 0, 0
+
+                        optical_flow[i] = [u_next - u_curr, v_next - v_curr]
+                        # --- CHANGE END ---
+
+            bm.free()
 
             #####################################################################
             """dump images"""
-            depth = pcl[:,2].reshape((height, width))
-            depth = (depth*1000).astype(np.uint16) #  resolution 1mm
-            depth_path = os.path.join( depth_dir, "%04d"%src_frame_id + ".png")
-            cv2.imwrite(depth_path , depth)
-            if render_sflow and flow_exist :
-                sflow =  np.matmul( np.linalg.inv (cam_opencv[:3, :3]),  sflow.transpose() ).transpose() #rotate to camera coordinate system (opencv)
-                sflow = sflow.reshape((height, width, 3)).astype(np.float32)
-                flow_path = os.path.join( sflow_dir, "%04d"%src_frame_id +"_%04d"%tgt_frame_id + ".exr")
-                cv2.imwrite (flow_path, sflow)
+            depth = pcl[:, 2].reshape((height, width))
+            depth = (depth * 1000).astype(np.uint16)  # resolution 1mm
+            depth_path = os.path.join(depth_dir, "%04d" % src_frame_id + ".png")
+            cv2.imwrite(depth_path, depth)
 
+            # --- CHANGE START ---
+            # Save Valid Mask
+            cv2.imwrite(os.path.join(mask_dir, "%04d" % src_frame_id + ".png"), valid_mask.reshape((height, width)))
+
+            # Save Optical Flow
+            if render_sflow and flow_exist:
+                write_flo(os.path.join(flow_dir, "%04d_%04d.flo" % (src_frame_id, tgt_frame_id)),
+                          optical_flow.reshape((height, width, 2)))
+            # --- CHANGE END ---
+
+            if render_sflow and flow_exist:
+                sflow = np.matmul(np.linalg.inv(cam_opencv[:3, :3]),
+                                  sflow.transpose()).transpose()  # rotate to camera coordinate system (opencv)
+                sflow = sflow.reshape((height, width, 3)).astype(np.float32)
+                flow_path = os.path.join(sflow_dir, "%04d" % src_frame_id + "_%04d" % tgt_frame_id + ".exr")
+                cv2.imwrite(flow_path, sflow)
 
 
 if __name__ == '__main__':
-
-
     argv = sys.argv
     argv = argv[argv.index("--") + 1:]  # get all args after "--"
     print(argv)
     anime_file = argv[0]
     dump_path = argv[1]
-    flow_skip = int ( argv[2] )
+    flow_skip = int(argv[2])
 
     #####################################################################
     """delete the default cube (which held the material)"""
@@ -291,10 +367,5 @@ if __name__ == '__main__':
     set_camera(bpy_camera.data, angle=pi /3, W=W, H=H)
     bpy.context.view_layer.update() #update camera params
 
-
     renderer = AnimeRenderer(anime_file, dump_path)
     renderer.depthflowgen(flow_skip=flow_skip)
-
-
-
-
